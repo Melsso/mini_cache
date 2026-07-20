@@ -101,3 +101,32 @@ class SimpleString(str):
 
 class Error(str):
     __slots__ = ()
+
+
+async def read_reply(reader: asyncio.StreamReader) -> object:
+    line = await _read_line(reader)
+    if line is None:
+        raise ProtocolError("unexpected EOF reading reply")
+
+    prefix, body = line[0], line[1:]
+
+    if prefix == "+":
+        return body
+    if prefix == "-":
+        return Error(body)
+    if prefix == ":":
+        return int(body)
+    if prefix == "$":
+        length = int(body)
+        if length == -1:
+            return None
+        data = await reader.readexactly(length)
+        await reader.readexactly(2)
+        return data.decode("utf-8", errors="replace")
+    if prefix == "*":
+        count = int(body)
+        if count == -1:
+            return None
+        return [await read_reply(reader) for _ in range(count)]
+
+    raise ProtocolError(f"unknown reply type: {line!r}")

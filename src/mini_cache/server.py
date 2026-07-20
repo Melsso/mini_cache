@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from mini_cache.aof import AOFLog, is_write_command
 from mini_cache.commands import dispatch
@@ -43,8 +44,10 @@ class Server:
         self._sweep_task: asyncio.Task | None = None
         self._client_tasks: set[asyncio.Task] = set()
         self._client_count = 0
+        self._start_time: float | None = None
 
     async def start(self) -> None:
+        self._start_time = time.monotonic()
         if self._aof_path is not None:
             self.aof = AOFLog(self._aof_path)
             replayed = await self.aof.replay(self.store)
@@ -135,6 +138,11 @@ class Server:
                     await self._serve_replica(reader, writer)
                     return
 
+                if command[0].upper() == "INFO":
+                    writer.write(encode(self._build_info()))
+                    await writer.drain()
+                    continue
+
                 reply: object
                 if self.replica_of is not None and is_write_command(command[0]):
                     reply = Error("READONLY You can't write against a replica.")
@@ -161,6 +169,34 @@ class Server:
             except Exception:
                 pass
             logger.info("client disconnected: %s (active=%d)", peer, self._client_count)
+
+    def _build_info(self) -> str:
+        uptime = int(time.monotonic() - self._start_time) if self._start_time else 0
+        lines = [
+            "# Server",
+            f"tcp_port:{self.port}",
+            f"uptime_in_seconds:{uptime}",
+            "# Clients",
+            f"connected_clients:{self._client_count}",
+            "# Replication",
+            f"role:{'replica' if self.replica_of else 'master'}",
+            f"connected_replicas:{len(self._replicas)}",
+        ]
+        if self.replica_of is not None:
+            master_host, master_port = self.replica_of
+            link_up = bool(
+                self.replica_client and self.replica_client.connected.is_set()
+            )
+            lines.append(f"master_host:{master_host}")
+            lines.append(f"master_port:{master_port}")
+            lines.append(f"master_link_status:{'up' if link_up else 'down'}")
+        lines += [
+            "# Persistence",
+            f"aof_enabled:{1 if self.aof is not None else 0}",
+            "# Keyspace",
+            f"db0:keys={len(self.store)}",
+        ]
+        return "\n".join(lines) + "\n"
 
     async def _serve_replica(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
