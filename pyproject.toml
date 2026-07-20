@@ -1,0 +1,31 @@
+[project]
+name = "mini-cache"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Mallem Sofiane",email = "melsopv@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "ruff (>=0.15.22,<0.16.0)",
+    "mypy (>=2.3.0,<3.0.0)"
+]
+
+[project.scripts]
+mini_cache = "mini_cache.__main__:main"
+
+[tool.poetry]
+packages = [{include = "mini_cache", from = "src"}]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.24.0"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
