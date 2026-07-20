@@ -9,7 +9,8 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "ruff (>=0.15.22,<0.16.0)",
-    "mypy (>=2.3.0,<3.0.0)"
+    "mypy (>=2.3.0,<3.0.0)",
+    "redis (>=8.0.1,<9.0.0)"
 ]
 
 [project.scripts]

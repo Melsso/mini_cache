@@ -1,0 +1,43 @@
+services:
+  shard1:
+    build: .
+    command: ["--host", "0.0.0.0", "--port", "6380", "--aof-path", "/data/shard1.aof"]
+    ports:
+      - "6400:6380"
+    volumes:
+      - shard1-data:/data
+
+  shard2:
+    build: .
+    command: ["--host", "0.0.0.0", "--port", "6380", "--aof-path", "/data/shard2.aof"]
+    ports:
+      - "6401:6380"
+    volumes:
+      - shard2-data:/data
+
+  shard3:
+    build: .
+    command: ["--host", "0.0.0.0", "--port", "6380", "--aof-path", "/data/shard3.aof"]
+    ports:
+      - "6402:6380"
+    volumes:
+      - shard3-data:/data
+
+  shard1-replica:
+    build: .
+    command:
+      [
+        "--host", "0.0.0.0",
+        "--port", "6380",
+        "--aof-path", "",
+        "--replica-of", "shard1:6380",
+      ]
+    ports:
+      - "6410:6380"
+    depends_on:
+      - shard1
+
+volumes:
+  shard1-data:
+  shard2-data:
+  shard3-data:
