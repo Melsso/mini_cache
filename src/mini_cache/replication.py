@@ -79,6 +79,10 @@ class ReplicaClient:
                 dispatch(self.store, command)
         finally:
             heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             writer.close()
             try:
                 await writer.wait_closed()

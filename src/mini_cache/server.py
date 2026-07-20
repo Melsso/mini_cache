@@ -41,6 +41,7 @@ class Server:
         self._replica_heartbeat_task: asyncio.Task | None = None
         self._asyncio_server: asyncio.base_events.Server | None = None
         self._sweep_task: asyncio.Task | None = None
+        self._client_tasks: set[asyncio.Task] = set()
         self._client_count = 0
 
     async def start(self) -> None:
@@ -71,24 +72,46 @@ class Server:
             await self._asyncio_server.serve_forever()
 
     async def stop(self) -> None:
-        if self._sweep_task is not None:
-            self._sweep_task.cancel()
-        if self._replica_task is not None:
-            self._replica_task.cancel()
-        if self._replica_heartbeat_task is not None:
-            self._replica_heartbeat_task.cancel()
         if self._asyncio_server is not None:
             self._asyncio_server.close()
+
+        await self._cancel_task(self._sweep_task)
+        await self._cancel_task(self._replica_task)
+        await self._cancel_task(self._replica_heartbeat_task)
+
+        for task in list(self._client_tasks):
+            task.cancel()
+        if self._client_tasks:
+            await asyncio.gather(*self._client_tasks, return_exceptions=True)
+
+        if self._asyncio_server is not None:
             await self._asyncio_server.wait_closed()
+
         if self.aof is not None:
             self.aof.close()
         for writer in list(self._replicas):
             writer.close()
         self._replicas.clear()
 
+    @staticmethod
+    async def _cancel_task(task: asyncio.Task | None) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("background task raised during shutdown")
+
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._client_tasks.add(task)
+
         peer = writer.get_extra_info("peername")
         self._client_count += 1
         logger.info("client connected: %s (active=%d)", peer, self._client_count)
@@ -126,10 +149,12 @@ class Server:
                     await self._propagate_to_replicas(command)
                 writer.write(encode(reply))
                 await writer.drain()
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             pass
         finally:
             self._client_count -= 1
+            if task is not None:
+                self._client_tasks.discard(task)
             writer.close()
             try:
                 await writer.wait_closed()
