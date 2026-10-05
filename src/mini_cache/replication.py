@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from mini_cache.commands import dispatch
-from mini_cache.protocol import encode, read_command
+from mini_cache.commands import dispatch, parse_set
+from mini_cache.protocol import Error, encode, read_command, read_reply
 from mini_cache.store import Store
 
 logger = logging.getLogger("mini_cache.replication")
@@ -27,11 +27,31 @@ def build_snapshot_commands(store: Store) -> list[list[str]]:
     return commands
 
 
+def to_replication_command(command: list[str]) -> list[str]:
+    if command[0].upper() == "SET":
+        try:
+            opts = parse_set(command[1:])
+        except ValueError:
+            return command
+        out = ["SET", opts.key, opts.value]
+        if opts.ttl is not None:
+            out += ["PX", str(max(1, int(round(opts.ttl * 1000))))]
+        return out
+    return command
+
+
 class ReplicaClient:
-    def __init__(self, primary_host: str, primary_port: int, store: Store) -> None:
+    def __init__(
+        self,
+        primary_host: str,
+        primary_port: int,
+        store: Store,
+        password: str | None = None,
+    ) -> None:
         self.primary_host = primary_host
         self.primary_port = primary_port
         self.store = store
+        self.password = password
         self.connected = asyncio.Event()
 
     async def run(self) -> None:
@@ -55,15 +75,24 @@ class ReplicaClient:
         reader, writer = await asyncio.open_connection(
             self.primary_host, self.primary_port
         )
-        writer.write(encode(["SYNC"]))
-        await writer.drain()
-        logger.info(
-            "connected to primary %s:%s, syncing", self.primary_host, self.primary_port
-        )
-        self.connected.set()
-
-        heartbeat_task = asyncio.create_task(self._send_heartbeats(writer))
+        heartbeat_task: asyncio.Task | None = None
         try:
+            if self.password is not None:
+                writer.write(encode(["AUTH", self.password]))
+                await writer.drain()
+                reply = await asyncio.wait_for(read_reply(reader), timeout=LINK_TIMEOUT)
+                if isinstance(reply, Error):
+                    raise ConnectionError(f"primary rejected AUTH: {reply}")
+            writer.write(encode(["SYNC"]))
+            await writer.drain()
+            logger.info(
+                "connected to primary %s:%s, syncing",
+                self.primary_host,
+                self.primary_port,
+            )
+            self.connected.set()
+
+            heartbeat_task = asyncio.create_task(self._send_heartbeats(writer))
             while True:
                 try:
                     command = await asyncio.wait_for(
@@ -75,15 +104,20 @@ class ReplicaClient:
                     break
                 if not command:
                     continue
+                if command[0].startswith("-"):
+                    raise ConnectionError(
+                        "primary refused replication: " + " ".join(command)[1:]
+                    )
                 if command[0].upper() == "PING":
                     continue
                 dispatch(self.store, command)
         finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             writer.close()
             try:
                 await writer.wait_closed()

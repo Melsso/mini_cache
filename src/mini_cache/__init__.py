@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from mini_cache.cluster import ClusterClient, ClusterError, ConsistentHashRing
+from mini_cache.cluster import (
+    ClusterClient,
+    ClusterError,
+    ConsistentHashRing,
+    ClusterTimeoutError,
+)
 from mini_cache.server import Server
 from mini_cache.store import Store
 
@@ -14,6 +19,7 @@ except PackageNotFoundError:
 __all__ = [
     "ClusterClient",
     "ClusterError",
+    "ClusterTimeoutError",
     "ConsistentHashRing",
     "Server",
     "Store",

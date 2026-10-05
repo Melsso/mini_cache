@@ -6,54 +6,91 @@ import os
 import time
 from pathlib import Path
 
-from mini_cache.commands import dispatch
+from mini_cache.commands import dispatch, parse_set
 from mini_cache.protocol import ProtocolError, encode, read_command
 from mini_cache.store import Store
 
+
 logger = logging.getLogger("mini_cache.aof")
 
-WRITE_COMMANDS = {"SET", "DEL", "EXPIRE", "PEXPIREAT", "PERSIST", "FLUSHDB"}
+WRITE_COMMANDS = {
+    "SET",
+    "MSET",
+    "DEL",
+    "INCR",
+    "DECR",
+    "INCRBY",
+    "DECRBY",
+    "EXPIRE",
+    "PEXPIRE",
+    "PEXPIREAT",
+    "PERSIST",
+    "FLUSHDB",
+}
 FSYNC_POLICIES = ("always", "everysec", "no")
+DEFAULT_FSYNC = "everysec"
 
 
 def is_write_command(name: str) -> bool:
     return name.upper() in WRITE_COMMANDS
 
 
-def _deadline_ms(now: float, seconds: str) -> int:
-    return int(round((now + float(seconds)) * 1000))
+def _deadline_ms(now: float, seconds: float) -> int:
+    return int(round((now + seconds) * 1000))
 
 
 def to_aof_commands(command: list[str], now: float | None = None) -> list[list[str]]:
     name = command[0].upper()
     now = time.time() if now is None else now
-    if name == "SET" and len(command) == 5 and command[3].upper() == "EX":
-        key, value = command[1], command[2]
-        return [
-            ["SET", key, value],
-            ["PEXPIREAT", key, str(_deadline_ms(now, command[4]))],
-        ]
+    if name == "SET":
+        try:
+            opts = parse_set(command[1:])
+        except ValueError:
+            return [command]
+        set_command = ["SET", opts.key, opts.value]
+        if opts.ttl is None:
+            return [set_command]
+        deadline = _deadline_ms(now, opts.ttl)
+        return [set_command, ["PEXPIREAT", opts.key, str(deadline)]]
     if name == "EXPIRE" and len(command) == 3:
-        return [["PEXPIREAT", command[1], str(_deadline_ms(now, command[2]))]]
+        deadline = _deadline_ms(now, float(command[2]))
+        return [["PEXPIREAT", command[1], str(deadline)]]
+    if name == "PEXPIRE" and len(command) == 3:
+        deadline = int(now * 1000) + int(command[2])
+        return [["PEXPIREAT", command[1], str(deadline)]]
     return [command]
 
 
 class AOFLog:
-    def __init__(self, path: str | Path, fsync: str = "always") -> None:
+    def __init__(self, path: str | Path, fsync: str = DEFAULT_FSYNC) -> None:
         if fsync not in FSYNC_POLICIES:
             raise ValueError(f"fsync must be one of {FSYNC_POLICIES}, got {fsync!r}")
         self.path = Path(path)
         self.fsync = fsync
         self._dirty = False
+        self._seq = 0
+        self._durable_seq = 0
+        self._commit_lock = asyncio.Lock()
         self._file = open(self.path, "ab")
 
     def append(self, command: list[str]) -> None:
         self._file.write(encode(command))
         self._file.flush()
-        if self.fsync == "always":
-            os.fsync(self._file.fileno())
-        else:
-            self._dirty = True
+        self._seq += 1
+        self._dirty = True
+
+    async def commit(self) -> None:
+        if self.fsync != "always":
+            return
+        seq = self._seq
+        if self._durable_seq >= seq:
+            return
+        async with self._commit_lock:
+            if self._durable_seq >= seq:
+                return
+            upto = self._seq
+            await asyncio.to_thread(os.fsync, self._file.fileno())
+            self._durable_seq = upto
 
     def sync(self) -> None:
         if self._dirty and not self._file.closed:

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import heapq
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
+
+
+_INT_RE = re.compile(r"-?[0-9]+")
 
 
 @dataclass
@@ -16,8 +20,10 @@ class Store:
     def __init__(self) -> None:
         self._data: dict[str, _Entry] = {}
         self._expiry_heap: list[tuple[float, str]] = []
+        self.writes = 0
 
     def set(self, key: str, value: Any, ttl: float | None = None) -> None:
+        self.writes += 1
         expire_at = (time.monotonic() + ttl) if ttl is not None else None
         self._data[key] = _Entry(value=value, expire_at=expire_at)
         if expire_at is not None:
@@ -38,6 +44,27 @@ class Store:
             return False
         del self._data[key]
         return not self._is_expired(entry)
+
+    def incr(self, key: str, delta: int) -> int:
+        entry = self._data.get(key)
+        if entry is not None and self._is_expired(entry):
+            del self._data[key]
+            entry = None
+        if entry is None:
+            current = 0
+        else:
+            if not isinstance(entry.value, str) or not _INT_RE.fullmatch(entry.value):
+                raise ValueError("value is not an integer or out of range")
+            current = int(entry.value)
+        new = current + delta
+        if not -(2**63) <= new < 2**63:
+            raise ValueError("increment or decrement would overflow")
+        self.writes += 1
+        if entry is None:
+            self._data[key] = _Entry(value=str(new), expire_at=None)
+        else:
+            entry.value = str(new)
+        return new
 
     def exists(self, key: str) -> bool:
         return self.get(key) is not None

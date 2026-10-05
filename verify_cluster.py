@@ -5,7 +5,10 @@ import time
 import redis
 
 from mini_cache.cluster import ConsistentHashRing
+import os
 
+
+PASSWORD = os.environ.get("MINI_CACHE_PASSWORD") or None
 SHARDS = {
     "shard1": 6400,
     "shard2": 6401,
@@ -18,6 +21,7 @@ def connect(port: int) -> redis.Redis:
     return redis.Redis(
         host="127.0.0.1",
         port=port,
+        password=PASSWORD,
         decode_responses=True,
         socket_connect_timeout=2,
         protocol=2,

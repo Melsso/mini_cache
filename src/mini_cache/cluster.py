@@ -8,10 +8,16 @@ from types import TracebackType
 from mini_cache.protocol import Error, ProtocolError, encode, read_reply
 
 DEFAULT_VIRTUAL_NODES = 150
+DEFAULT_CONNECT_TIMEOUT = 5.0
+DEFAULT_READ_TIMEOUT = 5.0
 
 
 class ClusterError(Exception):
     """Raised when a shard answers a command with an error reply."""
+
+
+class ClusterTimeoutError(ClusterError, TimeoutError):
+    """Raised when a shard does not accept a connection or answer in time."""
 
 
 class ConsistentHashRing:
@@ -60,9 +66,18 @@ class ConsistentHashRing:
 
 class ClusterClient:
     def __init__(
-        self, shards: list[tuple[str, int]], virtual_nodes: int = DEFAULT_VIRTUAL_NODES
+        self,
+        shards: list[tuple[str, int]],
+        virtual_nodes: int = DEFAULT_VIRTUAL_NODES,
+        *,
+        connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float | None = DEFAULT_READ_TIMEOUT,
+        password: str | None = None,
     ) -> None:
         self.shards = shards
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+        self.password = password
         self.ring = ConsistentHashRing(
             [self._node_id(h, p) for h, p in shards], virtual_nodes
         )
@@ -85,10 +100,22 @@ class ClusterClient:
     def node_for(self, key: str) -> str:
         return self.ring.get_node(key)
 
-    async def set(self, key: str, value: str, ttl: float | None = None) -> object:
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ttl: float | None = None,
+        *,
+        nx: bool = False,
+        xx: bool = False,
+    ) -> object:
         parts = ["SET", key, value]
         if ttl is not None:
             parts += ["EX", str(ttl)]
+        if nx:
+            parts.append("NX")
+        if xx:
+            parts.append("XX")
         return await self._execute(key, parts)
 
     async def get(self, key: str) -> object:
@@ -99,6 +126,9 @@ class ClusterClient:
 
     async def exists(self, key: str) -> object:
         return await self._execute(key, ["EXISTS", key])
+
+    async def incr(self, key: str, amount: int = 1) -> object:
+        return await self._execute(key, ["INCRBY", key, str(amount)])
 
     async def expire(self, key: str, seconds: float) -> object:
         return await self._execute(key, ["EXPIRE", key, str(seconds)])
@@ -126,11 +156,22 @@ class ClusterClient:
             for attempt in (0, 1):
                 try:
                     reader, writer = await self._connection_for(node_id)
-                    writer.write(encode(parts))
-                    await writer.drain()
-                    reply = await read_reply(reader)
+                    reply = await asyncio.wait_for(
+                        self._exchange(reader, writer, parts), self.read_timeout
+                    )
+                except ClusterError:
+                    self._discard_connection(node_id)
+                    raise
+                except TimeoutError:
+                    self._discard_connection(node_id)
+                    raise ClusterTimeoutError(
+                        f"{node_id}: no reply within {self.read_timeout}s"
+                    ) from None
+                except asyncio.CancelledError:
+                    self._discard_connection(node_id)
+                    raise
                 except (OSError, ProtocolError, asyncio.IncompleteReadError):
-                    await self._drop_connection(node_id)
+                    self._discard_connection(node_id)
                     if attempt == 1:
                         raise
                     continue
@@ -139,14 +180,50 @@ class ClusterClient:
                 return reply
         raise AssertionError("unreachable")
 
+    @staticmethod
+    async def _exchange(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        parts: list[str],
+    ) -> object:
+        writer.write(encode(parts))
+        await writer.drain()
+        return await read_reply(reader)
+
     async def _connection_for(
         self, node_id: str
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        if node_id not in self._connections:
-            host, port_str = node_id.rsplit(":", 1)
-            reader, writer = await asyncio.open_connection(host, int(port_str))
-            self._connections[node_id] = (reader, writer)
-        return self._connections[node_id]
+        existing = self._connections.get(node_id)
+        if existing is not None:
+            return existing
+        host, port_str = node_id.rsplit(":", 1)
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, int(port_str)), self.connect_timeout
+            )
+        except TimeoutError:
+            raise ClusterTimeoutError(
+                f"{node_id}: connect timed out after {self.connect_timeout}s"
+            ) from None
+        if self.password is not None:
+            try:
+                reply = await asyncio.wait_for(
+                    self._exchange(reader, writer, ["AUTH", self.password]),
+                    self.read_timeout,
+                )
+            except BaseException:
+                writer.close()
+                raise
+            if isinstance(reply, Error):
+                writer.close()
+                raise ClusterError(f"{node_id}: {reply}")
+        self._connections[node_id] = (reader, writer)
+        return reader, writer
+
+    def _discard_connection(self, node_id: str) -> None:
+        connection = self._connections.pop(node_id, None)
+        if connection is not None:
+            connection[1].close()
 
     async def _drop_connection(self, node_id: str) -> None:
         connection = self._connections.pop(node_id, None)

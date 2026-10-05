@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import logging
 import time
 
-from mini_cache.aof import FSYNC_POLICIES, AOFLog, is_write_command, to_aof_commands
+from mini_cache.aof import (
+    DEFAULT_FSYNC,
+    FSYNC_POLICIES,
+    AOFLog,
+    is_write_command,
+    to_aof_commands,
+)
 from mini_cache.commands import dispatch
 from mini_cache.protocol import (
     Error,
@@ -18,6 +26,7 @@ from mini_cache.replication import (
     LINK_TIMEOUT,
     ReplicaClient,
     build_snapshot_commands,
+    to_replication_command,
 )
 from mini_cache.store import Store
 
@@ -29,6 +38,15 @@ EXPIRY_SWEEP_INTERVAL = 0.1
 AOF_SYNC_INTERVAL = 1.0
 
 
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class Server:
     def __init__(
         self,
@@ -36,7 +54,9 @@ class Server:
         port: int = DEFAULT_PORT,
         aof_path: str | None = None,
         replica_of: tuple[str, int] | None = None,
-        aof_fsync: str = "always",
+        aof_fsync: str = DEFAULT_FSYNC,
+        requirepass: str | None = None,
+        masterauth: str | None = None,
     ) -> None:
         if aof_fsync not in FSYNC_POLICIES:
             raise ValueError(
@@ -48,6 +68,8 @@ class Server:
         self.aof: AOFLog | None = None
         self._aof_path = aof_path
         self._aof_fsync = aof_fsync
+        self.requirepass = requirepass or None
+        self.masterauth = masterauth or None
         self.replica_of = replica_of
         self.replica_client: ReplicaClient | None = None
         self._replica_task: asyncio.Task | None = None
@@ -62,6 +84,7 @@ class Server:
 
     async def start(self) -> None:
         self._start_time = time.monotonic()
+        self._warn_if_exposed()
         if self._aof_path is not None:
             if self.replica_of is not None:
                 logger.warning(
@@ -75,7 +98,12 @@ class Server:
 
         if self.replica_of is not None:
             primary_host, primary_port = self.replica_of
-            self.replica_client = ReplicaClient(primary_host, primary_port, self.store)
+            self.replica_client = ReplicaClient(
+                primary_host,
+                primary_port,
+                self.store,
+                password=self.masterauth or self.requirepass,
+            )
             self._replica_task = asyncio.create_task(self.replica_client.run())
 
         self._asyncio_server = await asyncio.start_server(
@@ -89,6 +117,22 @@ class Server:
             self._aof_sync_task = asyncio.create_task(self._aof_sync_loop())
         addr = self._asyncio_server.sockets[0].getsockname()
         logger.info("mini_cache listening on %s:%s", addr[0], addr[1])
+
+    def _warn_if_exposed(self) -> None:
+        if _is_loopback(self.host):
+            return
+        if self.requirepass is None:
+            logger.warning(
+                "listening on %s with NO password: anyone who can reach this port "
+                "can read, write and flush the cache (use --requirepass)",
+                self.host,
+            )
+        else:
+            logger.warning(
+                "listening on non-loopback %s: there is no TLS, so the password "
+                "and data cross the network unencrypted",
+                self.host,
+            )
 
     async def serve_forever(self) -> None:
         await self.start()
@@ -133,6 +177,17 @@ class Server:
         except Exception:
             logger.exception("background task raised during shutdown")
 
+    def _check_auth(self, args: list[str]) -> Error | SimpleString:
+        if self.requirepass is None:
+            return Error("ERR AUTH called without any password configured")
+        if len(args) not in (1, 2):
+            return Error("ERR wrong number of arguments for 'AUTH' command")
+        if len(args) == 2 and args[0] != "default":
+            return Error("WRONGPASS invalid username-password pair")
+        if hmac.compare_digest(args[-1].encode(), self.requirepass.encode()):
+            return SimpleString("OK")
+        return Error("WRONGPASS invalid username-password pair")
+
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -143,6 +198,8 @@ class Server:
         peer = writer.get_extra_info("peername")
         self._client_count += 1
         logger.info("client connected: %s (active=%d)", peer, self._client_count)
+
+        authed = self.requirepass is None
 
         try:
             while True:
@@ -168,6 +225,19 @@ class Server:
                     await writer.drain()
                     break
 
+                if name == "AUTH":
+                    auth_reply = self._check_auth(command[1:])
+                    if self.requirepass is not None:
+                        authed = isinstance(auth_reply, SimpleString)
+                    writer.write(encode(auth_reply))
+                    await writer.drain()
+                    continue
+
+                if not authed:
+                    writer.write(encode(Error("NOAUTH Authentication required.")))
+                    await writer.drain()
+                    continue
+
                 if name == "SYNC":
                     if self.replica_of is not None:
                         writer.write(
@@ -190,12 +260,18 @@ class Server:
                     await writer.drain()
                     continue
 
+                before = self.store.writes
                 reply = dispatch(self.store, command)
                 if not isinstance(reply, Error) and is_write_command(name):
-                    if self.aof is not None:
-                        for aof_command in to_aof_commands(command):
-                            self.aof.append(aof_command)
-                    await self._propagate_to_replicas(command)
+                    if name != "SET" or self.store.writes != before:
+                        if self.aof is not None:
+                            for aof_command in to_aof_commands(command):
+                                self.aof.append(aof_command)
+                        await self._propagate_to_replicas(
+                            to_replication_command(command)
+                        )
+                        if self.aof is not None:
+                            await self.aof.commit()
                 writer.write(encode(reply))
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
@@ -246,6 +322,12 @@ class Server:
     ) -> None:
         peer = writer.get_extra_info("peername")
         logger.info("replica connected: %s", peer)
+        if self.aof is None:
+            logger.warning(
+                "replica %s is syncing from a primary WITHOUT AOF: if this primary "
+                "restarts empty, a full resync will reset the replica to empty too",
+                peer,
+            )
         self._replicas.add(writer)
         try:
             writer.write(encode(["FLUSHDB"]))

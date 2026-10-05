@@ -1,30 +1,35 @@
+x-mini-cache: &mini-cache
+  build: .
+  environment:
+    MINI_CACHE_PASSWORD: ${MINI_CACHE_PASSWORD:-}
+
 services:
   shard1:
-    build: .
+    <<: *mini-cache
     command: ["--host", "0.0.0.0", "--port", "6380", "--aof-path", "/data/shard1.aof"]
     ports:
-      - "6400:6380"
+      - "127.0.0.1:6400:6380"
     volumes:
       - shard1-data:/data
 
   shard2:
-    build: .
+    <<: *mini-cache
     command: ["--host", "0.0.0.0", "--port", "6380", "--aof-path", "/data/shard2.aof"]
     ports:
-      - "6401:6380"
+      - "127.0.0.1:6401:6380"
     volumes:
       - shard2-data:/data
 
   shard3:
-    build: .
+    <<: *mini-cache
     command: ["--host", "0.0.0.0", "--port", "6380", "--aof-path", "/data/shard3.aof"]
     ports:
-      - "6402:6380"
+      - "127.0.0.1:6402:6380"
     volumes:
       - shard3-data:/data
 
   shard1-replica:
-    build: .
+    <<: *mini-cache
     command:
       [
         "--host", "0.0.0.0",
@@ -33,7 +38,7 @@ services:
         "--replica-of", "shard1:6380",
       ]
     ports:
-      - "6410:6380"
+      - "127.0.0.1:6410:6380"
     depends_on:
       - shard1
 

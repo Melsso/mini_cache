@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import fnmatch
+import math
+import re
+from dataclasses import dataclass
 from typing import Callable
 
 from mini_cache.protocol import Error, SimpleString
 from mini_cache.store import Store
 
 Handler = Callable[[Store, list[str]], object]
+
+_INT_RE = re.compile(r"-?[0-9]+")
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 def dispatch(store: Store, command: list[str]) -> object:
@@ -32,7 +39,7 @@ class _WrongArity(Exception):
     pass
 
 
-class _BadArgument(Exception):
+class _BadArgument(ValueError):
     pass
 
 
@@ -44,6 +51,63 @@ def _require(args: list[str], count: int) -> None:
 def _require_min(args: list[str], minimum: int) -> None:
     if len(args) < minimum:
         raise _WrongArity
+
+
+def _parse_int(text: str) -> int:
+    if not _INT_RE.fullmatch(text):
+        raise _BadArgument("value is not an integer or out of range")
+    number = int(text)
+    if not _INT64_MIN <= number <= _INT64_MAX:
+        raise _BadArgument("value is not an integer or out of range")
+    return number
+
+
+@dataclass
+class SetOptions:
+    key: str
+    value: str
+    nx: bool = False
+    xx: bool = False
+    get: bool = False
+    ttl: float | None = None
+
+
+def _parse_ttl(unit: str, text: str) -> float:
+    try:
+        amount = float(text) if unit == "EX" else int(text)
+    except ValueError as exc:
+        raise _BadArgument("value is not an integer or out of range") from exc
+    if not math.isfinite(amount):
+        raise _BadArgument("syntax error")
+    if amount <= 0:
+        raise _BadArgument("invalid expire time in 'set' command")
+    return amount if unit == "EX" else amount / 1000
+
+
+def parse_set(args: list[str]) -> SetOptions:
+    if len(args) < 2:
+        raise _BadArgument("syntax error")
+    opts = SetOptions(args[0], args[1])
+    i = 2
+    while i < len(args):
+        option = args[i].upper()
+        if option == "NX":
+            opts.nx = True
+        elif option == "XX":
+            opts.xx = True
+        elif option == "GET":
+            opts.get = True
+        elif option in ("EX", "PX"):
+            if opts.ttl is not None or i + 1 >= len(args):
+                raise _BadArgument("syntax error")
+            i += 1
+            opts.ttl = _parse_ttl(option, args[i])
+        else:
+            raise _BadArgument("syntax error")
+        i += 1
+    if opts.nx and opts.xx:
+        raise _BadArgument("syntax error")
+    return opts
 
 
 def _cmd_ping(store: Store, args: list[str]) -> object:
@@ -61,27 +125,59 @@ def _cmd_echo(store: Store, args: list[str]) -> object:
 
 def _cmd_set(store: Store, args: list[str]) -> object:
     _require_min(args, 2)
-    key, value = args[0], args[1]
-    ttl: float | None = None
-
-    rest = args[2:]
-    if rest:
-        if len(rest) != 2 or rest[0].upper() != "EX":
-            raise _BadArgument("syntax error")
-        try:
-            ttl = float(rest[1])
-        except ValueError as exc:
-            raise _BadArgument("value is not an integer or out of range") from exc
-        if ttl <= 0:
-            raise _BadArgument("invalid expire time")
-
-    store.set(key, value, ttl=ttl)
-    return SimpleString("OK")
+    opts = parse_set(args)
+    exists = store.exists(opts.key)
+    previous = store.get(opts.key) if opts.get else None
+    if (opts.nx and exists) or (opts.xx and not exists):
+        return previous
+    store.set(opts.key, opts.value, ttl=opts.ttl)
+    return previous if opts.get else SimpleString("OK")
 
 
 def _cmd_get(store: Store, args: list[str]) -> object:
     _require(args, 1)
     return store.get(args[0])
+
+
+def _cmd_mset(store: Store, args: list[str]) -> object:
+    _require_min(args, 2)
+    if len(args) % 2:
+        raise _WrongArity
+    for i in range(0, len(args), 2):
+        store.set(args[i], args[i + 1])
+    return SimpleString("OK")
+
+
+def _cmd_mget(store: Store, args: list[str]) -> object:
+    _require_min(args, 1)
+    return [store.get(key) for key in args]
+
+
+def _incr(store: Store, key: str, delta: int) -> object:
+    try:
+        return store.incr(key, delta)
+    except ValueError as exc:
+        raise _BadArgument(str(exc)) from exc
+
+
+def _cmd_incr(store: Store, args: list[str]) -> object:
+    _require(args, 1)
+    return _incr(store, args[0], 1)
+
+
+def _cmd_decr(store: Store, args: list[str]) -> object:
+    _require(args, 1)
+    return _incr(store, args[0], -1)
+
+
+def _cmd_incrby(store: Store, args: list[str]) -> object:
+    _require(args, 2)
+    return _incr(store, args[0], _parse_int(args[1]))
+
+
+def _cmd_decrby(store: Store, args: list[str]) -> object:
+    _require(args, 2)
+    return _incr(store, args[0], -_parse_int(args[1]))
 
 
 def _cmd_del(store: Store, args: list[str]) -> object:
@@ -101,6 +197,11 @@ def _cmd_expire(store: Store, args: list[str]) -> object:
     except ValueError as exc:
         raise _BadArgument("value is not an integer or out of range") from exc
     return store.expire(args[0], seconds)
+
+
+def _cmd_pexpire(store: Store, args: list[str]) -> object:
+    _require(args, 2)
+    return store.expire(args[0], _parse_int(args[1]) / 1000)
 
 
 def _cmd_pexpireat(store: Store, args: list[str]) -> object:
@@ -148,9 +249,16 @@ _COMMANDS: dict[str, Handler] = {
     "ECHO": _cmd_echo,
     "SET": _cmd_set,
     "GET": _cmd_get,
+    "MSET": _cmd_mset,
+    "MGET": _cmd_mget,
+    "INCR": _cmd_incr,
+    "DECR": _cmd_decr,
+    "INCRBY": _cmd_incrby,
+    "DECRBY": _cmd_decrby,
     "DEL": _cmd_del,
     "EXISTS": _cmd_exists,
     "EXPIRE": _cmd_expire,
+    "PEXPIRE": _cmd_pexpire,
     "PEXPIREAT": _cmd_pexpireat,
     "TTL": _cmd_ttl,
     "PERSIST": _cmd_persist,

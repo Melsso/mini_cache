@@ -5,8 +5,9 @@ import asyncio
 import logging
 import signal
 
+import os
+from mini_cache.aof import DEFAULT_FSYNC, FSYNC_POLICIES
 from mini_cache import __version__
-from mini_cache.aof import FSYNC_POLICIES
 from mini_cache.server import DEFAULT_HOST, DEFAULT_PORT, Server
 
 
@@ -62,6 +63,23 @@ def main() -> None:
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="enable debug logging"
     )
+    parser.add_argument(
+        "--aof-fsync",
+        choices=FSYNC_POLICIES,
+        default=DEFAULT_FSYNC,
+        help="when to fsync the AOF: every write (safest), about once per second (default), or never",
+    )
+    parser.add_argument(
+        "--requirepass",
+        default=os.environ.get("MINI_CACHE_PASSWORD") or None,
+        help="require clients to AUTH with this password (default: $MINI_CACHE_PASSWORD; "
+        "prefer the env var, command-line arguments are visible in `ps`)",
+    )
+    parser.add_argument(
+        "--masterauth",
+        default=os.environ.get("MINI_CACHE_MASTERAUTH") or None,
+        help="password to AUTH with against the primary (default: the --requirepass value)",
+    )
     args = parser.parse_args()
 
     replica_of: tuple[str, int] | None = None
@@ -82,6 +100,8 @@ def main() -> None:
         aof_path=args.aof_path or None,
         replica_of=replica_of,
         aof_fsync=args.aof_fsync,
+        requirepass=args.requirepass,
+        masterauth=args.masterauth,
     )
     try:
         asyncio.run(_run(server))
