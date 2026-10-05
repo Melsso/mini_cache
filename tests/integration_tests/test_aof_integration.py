@@ -41,7 +41,7 @@ async def test_data_survives_server_restart(tmp_path):
 
     server1 = Server(host="127.0.0.1", port=0, aof_path=aof_path)
     await server1.start()
-    port1 = server1._asyncio_server.sockets[0].getsockname()[1]
+    port1 = server1.bound_port
 
     reader, writer = await open_client(port1)
     await send(writer, "SET", "foo", "bar")
@@ -56,7 +56,7 @@ async def test_data_survives_server_restart(tmp_path):
 
     server2 = Server(host="127.0.0.1", port=0, aof_path=aof_path)
     await server2.start()
-    port2 = server2._asyncio_server.sockets[0].getsockname()[1]
+    port2 = server2.bound_port
 
     reader, writer = await open_client(port2)
     await send(writer, "GET", "foo")
@@ -73,7 +73,7 @@ async def test_read_commands_are_not_persisted(tmp_path):
 
     server1 = Server(host="127.0.0.1", port=0, aof_path=aof_path)
     await server1.start()
-    port1 = server1._asyncio_server.sockets[0].getsockname()[1]
+    port1 = server1.bound_port
 
     reader, writer = await open_client(port1)
     await send(writer, "SET", "foo", "bar")
@@ -88,7 +88,7 @@ async def test_read_commands_are_not_persisted(tmp_path):
 
     server2 = Server(host="127.0.0.1", port=0, aof_path=aof_path)
     await server2.start()
-    assert server2.store.get("foo") == "bar"
+    assert server2.store.get(b"foo") == b"bar"
     await server2.stop()
 
 
@@ -97,7 +97,7 @@ async def test_failed_write_command_not_persisted(tmp_path):
 
     server1 = Server(host="127.0.0.1", port=0, aof_path=aof_path)
     await server1.start()
-    port1 = server1._asyncio_server.sockets[0].getsockname()[1]
+    port1 = server1.bound_port
 
     reader, writer = await open_client(port1)
     await send(writer, "SET", "foo")

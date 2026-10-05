@@ -50,7 +50,7 @@ async def wait_until(condition, timeout=6.0, interval=0.05):
 
 
 def port_of(server):
-    return server._asyncio_server.sockets[0].getsockname()[1]
+    return server.bound_port
 
 
 async def start_server(**kwargs):
@@ -134,10 +134,10 @@ async def test_ttls_survive_a_restart_as_absolute_deadlines(tmp_path):
     await asyncio.sleep(1.3)
 
     server2 = await start_server(aof_path=aof_path)
-    assert server2.store.get("short") is None
-    assert server2.store.get("later") is None
-    assert server2.store.get("long") == "1"
-    remaining = server2.store.ttl("long")
+    assert server2.store.get(b"short") is None
+    assert server2.store.get(b"later") is None
+    assert server2.store.get(b"long") == b"1"
+    remaining = server2.store.ttl(b"long")
     assert remaining is not None and 90 < remaining < 99.5
     await server2.stop()
 
@@ -156,7 +156,7 @@ async def test_server_starts_after_a_crash_left_a_torn_aof(tmp_path):
         f.write(b"*3\r\n$3\r\nSET\r\n$3\r\nba")
 
     server2 = await start_server(aof_path=str(aof_path))
-    assert server2.store.get("foo") == "bar"
+    assert server2.store.get(b"foo") == b"bar"
     assert (tmp_path / "crash.aof.corrupt").exists()
     reader, writer = await open_client(port_of(server2))
     await send(writer, "SET", "after", "crash")
@@ -165,8 +165,8 @@ async def test_server_starts_after_a_crash_left_a_torn_aof(tmp_path):
     await server2.stop()
 
     server3 = await start_server(aof_path=str(aof_path))
-    assert server3.store.get("foo") == "bar"
-    assert server3.store.get("after") == "crash"
+    assert server3.store.get(b"foo") == b"bar"
+    assert server3.store.get(b"after") == b"crash"
     await server3.stop()
 
 
@@ -180,7 +180,7 @@ async def test_everysec_policy_persists_data(tmp_path):
     await server1.stop()
 
     server2 = await start_server(aof_path=aof_path)
-    assert server2.store.get("foo") == "bar"
+    assert server2.store.get(b"foo") == b"bar"
     await server2.stop()
 
 
@@ -210,7 +210,7 @@ async def test_reconnecting_replica_drops_keys_deleted_while_it_was_away():
     writer.close()
 
     replica = await start_server(replica_of=("127.0.0.1", port))
-    assert await wait_until(lambda: replica.store.get("foo") == "bar")
+    assert await wait_until(lambda: replica.store.get(b"foo") == b"bar")
 
     await primary1.stop()
     assert await wait_until(lambda: not replica.replica_client.connected.is_set())
@@ -221,8 +221,8 @@ async def test_reconnecting_replica_drops_keys_deleted_while_it_was_away():
     await read_reply(reader)
     writer.close()
 
-    assert await wait_until(lambda: replica.store.get("fresh") == "value")
-    assert replica.store.get("foo") is None
+    assert await wait_until(lambda: replica.store.get(b"fresh") == b"value")
+    assert replica.store.get(b"foo") is None
 
     await replica.stop()
     await primary2.stop()
@@ -237,7 +237,7 @@ async def test_cluster_client_handles_concurrent_calls():
 
     await asyncio.gather(*(client.set(f"k{i}", str(i)) for i in range(200)))
     values = await asyncio.gather(*(client.get(f"k{i}") for i in range(200)))
-    assert values == [str(i) for i in range(200)]
+    assert values == [str(i).encode() for i in range(200)]
 
     await client.close()
     await server_a.stop()
@@ -248,13 +248,13 @@ async def test_cluster_client_reconnects_after_a_shard_restarts():
     server = await start_server()
     port = port_of(server)
     client = ClusterClient([("127.0.0.1", port)])
-    assert await client.set("a", "1") == "OK"
+    assert await client.set("a", "1") is True
 
     await server.stop()
     server = await start_server(port=port)
 
-    assert await client.set("b", "2") == "OK"
-    assert await client.get("b") == "2"
+    assert await client.set("b", "2") is True
+    assert await client.get("b") == b"2"
 
     await client.close()
     await server.stop()
@@ -265,6 +265,6 @@ async def test_cluster_client_raises_on_error_replies_and_works_as_context_manag
     async with ClusterClient([("127.0.0.1", port_of(server))]) as client:
         with pytest.raises(ClusterError):
             await client.expire("foo", "not-a-number")
-        assert await client.set("foo", "bar") == "OK"
-    assert client._connections == {}
+        assert await client.set("foo", "bar") is True
+    assert all(not pool.idle for pool in client._pools.values())
     await server.stop()

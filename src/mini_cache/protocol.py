@@ -8,24 +8,40 @@ CRLF = b"\r\n"
 MAX_BULK_LENGTH = 64 * 1024 * 1024
 MAX_ARRAY_LENGTH = 1024 * 1024
 
+Arg = bytes | str
+
 
 class ProtocolError(Exception):
     """Raised when the peer sends malformed RESP."""
 
 
-def _parse_int(text: str, what: str) -> int:
+class SimpleString(str):
+    __slots__ = ()
+
+
+class Error(str):
+    __slots__ = ()
+
+
+def to_text(arg: Arg) -> str:
+    if isinstance(arg, (bytes, bytearray)):
+        return bytes(arg).decode("utf-8", errors="replace")
+    return arg
+
+
+def _parse_int(data: bytes, what: str) -> int:
     try:
-        return int(text)
+        return int(data)
     except ValueError as exc:
-        raise ProtocolError(f"invalid {what}: {text!r}") from exc
+        raise ProtocolError(f"invalid {what}: {data!r}") from exc
 
 
-async def read_command(reader: asyncio.StreamReader) -> list[str] | None:
+async def read_command(reader: asyncio.StreamReader) -> list[bytes] | None:
     line = await _read_line(reader)
     if line is None:
         return None
 
-    if not line.startswith("*"):
+    if not line.startswith(b"*"):
         return line.split()
 
     num_args = _parse_int(line[1:], "array length")
@@ -35,13 +51,13 @@ async def read_command(reader: asyncio.StreamReader) -> list[str] | None:
     if num_args > MAX_ARRAY_LENGTH:
         raise ProtocolError(f"array length too large: {num_args}")
 
-    args: list[str] = []
+    args: list[bytes] = []
     for _ in range(num_args):
         args.append(await _read_bulk_string(reader))
     return args
 
 
-async def _read_line(reader: asyncio.StreamReader) -> str | None:
+async def _read_line(reader: asyncio.StreamReader) -> bytes | None:
     try:
         raw = await reader.readline()
     except ValueError as exc:
@@ -50,7 +66,7 @@ async def _read_line(reader: asyncio.StreamReader) -> str | None:
         return None
     if not raw.endswith(CRLF):
         raise ProtocolError(f"line not CRLF-terminated: {raw!r}")
-    return raw[:-2].decode("utf-8", errors="replace")
+    return raw[:-2]
 
 
 def _check_bulk_length(length: int) -> None:
@@ -58,23 +74,23 @@ def _check_bulk_length(length: int) -> None:
         raise ProtocolError(f"invalid bulk string length: {length}")
 
 
-async def _read_bulk_string(reader: asyncio.StreamReader) -> str:
+async def _read_bulk_string(reader: asyncio.StreamReader) -> bytes:
     header = await _read_line(reader)
     if header is None:
         raise ProtocolError("unexpected EOF reading bulk string header")
-    if not header.startswith("$"):
+    if not header.startswith(b"$"):
         raise ProtocolError(f"expected bulk string, got: {header!r}")
 
     length = _parse_int(header[1:], "bulk string length")
     _check_bulk_length(length)
     if length == -1:
-        return ""
+        return b""
 
     data = await reader.readexactly(length)
     trailer = await reader.readexactly(2)
     if trailer != CRLF:
         raise ProtocolError("bulk string missing trailing CRLF")
-    return data.decode("utf-8", errors="replace")
+    return data
 
 
 def encode(value: Any) -> bytes:
@@ -101,14 +117,6 @@ def encode(value: Any) -> bytes:
     raise TypeError(f"cannot encode value of type {type(value)!r} as RESP")
 
 
-class SimpleString(str):
-    __slots__ = ()
-
-
-class Error(str):
-    __slots__ = ()
-
-
 async def read_reply(reader: asyncio.StreamReader) -> object:
     line = await _read_line(reader)
     if line is None:
@@ -116,23 +124,23 @@ async def read_reply(reader: asyncio.StreamReader) -> object:
     if not line:
         raise ProtocolError("empty reply line")
 
-    prefix, body = line[0], line[1:]
+    prefix, body = line[:1], line[1:]
 
-    if prefix == "+":
-        return body
-    if prefix == "-":
-        return Error(body)
-    if prefix == ":":
+    if prefix == b"+":
+        return body.decode("utf-8", errors="replace")
+    if prefix == b"-":
+        return Error(body.decode("utf-8", errors="replace"))
+    if prefix == b":":
         return _parse_int(body, "integer reply")
-    if prefix == "$":
+    if prefix == b"$":
         length = _parse_int(body, "bulk string length")
         _check_bulk_length(length)
         if length == -1:
             return None
         data = await reader.readexactly(length)
         await reader.readexactly(2)
-        return data.decode("utf-8", errors="replace")
-    if prefix == "*":
+        return data
+    if prefix == b"*":
         count = _parse_int(body, "array length")
         if count == -1:
             return None

@@ -9,7 +9,7 @@ from mini_cache.server import Server
 async def running_server():
     server = Server(host="127.0.0.1", port=0)
     await server.start()
-    port = server._asyncio_server.sockets[0].getsockname()[1]
+    port = server.bound_port
     yield port
     await server.stop()
 

@@ -29,8 +29,8 @@ async def test_append_then_replay_restores_state(tmp_path):
     replay_log.close()
 
     assert count == 3
-    assert store.get("foo") is None
-    assert store.get("baz") == "qux"
+    assert store.get(b"foo") is None
+    assert store.get(b"baz") == b"qux"
 
 
 async def test_replay_empty_file_returns_zero(tmp_path):
@@ -63,6 +63,6 @@ async def test_replay_preserves_ttl_semantics(tmp_path):
     await replay_log.replay(store)
     replay_log.close()
 
-    ttl = store.ttl("session")
+    ttl = store.ttl(b"session")
     assert ttl is not None
     assert 999 <= ttl <= 1000

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `--maxmemory` / `--maxmemory-policy` (`allkeys-lru`, `noeviction`); evictions are logged to the AOF and replicated as `DEL`.
+- `--maxclients`, `--timeout` (idle) and `--client-output-limit`; clients that stop reading are dropped.
+- `BGREWRITEAOF`, automatic AOF rewrite (`--aof-rewrite-min-size`, `--aof-rewrite-percentage`).
+- `INFO` memory, stats and AOF sections (hits, misses, expired/evicted keys, commands, connections).
+- `Server.bound_port`.
+- `ClusterClient`: connection pool (`pool_size`), `mget`, `mset`, `pipeline()`, `keys`, `delete_pattern`, `flush_all`, `dbsize`.
 - `AUTH` / `--requirepass` (or `MINI_CACHE_PASSWORD`), `--masterauth` for replicas, and `password=` on `ClusterClient`.
 - Warning at startup when binding a non-loopback address (no password / no TLS).
 - Commands: `INCR`, `DECR`, `INCRBY`, `DECRBY`, `MGET`, `MSET`, `PEXPIRE`; `SET` options `NX`, `XX`, `PX`, `GET`.
@@ -14,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Python 3.13 support (CI matrix and classifiers).
 
 ### Changed
+- **Breaking:** keys and values are bytes end to end (previously UTF-8 text with invalid bytes replaced, which silently corrupted binary values). `ClusterClient` returns typed values: `get` -> `bytes | None`, `set` -> `bool`, `incr`/`delete`/`ttl` -> `int`.
+- `ClusterClient` replaces its single connection per shard with a pool.
+- Replication writes go through a per-replica queue: a slow replica no longer slows the primary, and one more than 64 MiB behind is dropped and resyncs.
+- Replication stream order is now identical for every replica.
+- README: "Failover-aware" reworded to "failure-detecting" (there is detection and reconnect, no promotion).
 - **Default `--aof-fsync` is now `everysec`** (was `always`). `always` now uses group commit and no longer blocks the event loop.
 - `requires-python` is now `>=3.11` (was `>=3.11,<3.13`).
 - Replication now forwards `SET ... EX` as `SET ... PX` (relative, still clock-independent).

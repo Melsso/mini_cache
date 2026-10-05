@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 
 from mini_cache.commands import dispatch, parse_set
-from mini_cache.protocol import Error, encode, read_command, read_reply
+from mini_cache.protocol import Arg, Error, encode, read_command, read_reply
 from mini_cache.store import Store
 
 logger = logging.getLogger("mini_cache.replication")
@@ -14,30 +15,30 @@ HEARTBEAT_INTERVAL = 1.0
 LINK_TIMEOUT = 5.0
 
 
-def build_snapshot_commands(store: Store) -> list[list[str]]:
-    commands: list[list[str]] = []
-    for key in store.keys():
-        value = store.get(key)
-        if value is None:
-            continue
+def build_snapshot_commands(store: Store) -> list[list[Arg]]:
+    commands: list[list[Arg]] = []
+    for key, value, ttl in store.snapshot():
         commands.append(["SET", key, value])
-        ttl = store.ttl(key)
-        if ttl is not None and ttl >= 0:
+        if ttl is not None:
             commands.append(["EXPIRE", key, str(int(ttl) + 1)])
     return commands
 
 
-def to_replication_command(command: list[str]) -> list[str]:
-    if command[0].upper() == "SET":
+def to_replication_command(command: Sequence[Arg]) -> list[Arg]:
+    if (
+        isinstance(command[0], str)
+        and command[0].upper() == "SET"
+        or (isinstance(command[0], bytes) and command[0].upper() == b"SET")
+    ):
         try:
             opts = parse_set(command[1:])
         except ValueError:
-            return command
-        out = ["SET", opts.key, opts.value]
+            return list(command)
+        out: list[Arg] = ["SET", opts.key, opts.value]
         if opts.ttl is not None:
             out += ["PX", str(max(1, int(round(opts.ttl * 1000))))]
         return out
-    return command
+    return list(command)
 
 
 class ReplicaClient:
@@ -104,11 +105,12 @@ class ReplicaClient:
                     break
                 if not command:
                     continue
-                if command[0].startswith("-"):
+                if command[0].startswith(b"-"):
                     raise ConnectionError(
-                        "primary refused replication: " + " ".join(command)[1:]
+                        "primary refused replication: "
+                        + b" ".join(command).decode("utf-8", "replace")[1:]
                     )
-                if command[0].upper() == "PING":
+                if command[0].upper() == b"PING":
                     continue
                 dispatch(self.store, command)
         finally:

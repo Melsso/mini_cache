@@ -158,7 +158,7 @@ async def run_in_process(
 ) -> None:
     server = Server(host="127.0.0.1", port=0, aof_path=aof_path, aof_fsync=aof_fsync)
     await server.start()
-    port = server._asyncio_server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    port = server.bound_port
     try:
         await run_suite("127.0.0.1", port, label, args)
     finally:

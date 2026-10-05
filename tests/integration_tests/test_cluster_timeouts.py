@@ -11,16 +11,20 @@ async def start_fake(handler):
     return server, server.sockets[0].getsockname()[1]
 
 
-async def test_hung_shard_times_out_and_releases_the_lock():
+def no_idle(client):
+    return all(not pool.idle for pool in client._pools.values())
+
+
+async def test_hung_shard_times_out_and_frees_its_slot():
     async def hang(reader, writer):
         await reader.read()
 
     server, port = await start_fake(hang)
-    client = ClusterClient([("127.0.0.1", port)], read_timeout=0.2)
+    client = ClusterClient([("127.0.0.1", port)], read_timeout=0.2, pool_size=1)
 
     with pytest.raises(ClusterTimeoutError):
         await client.get("k")
-    assert client._connections == {}
+    assert no_idle(client)
     with pytest.raises(ClusterTimeoutError):
         await asyncio.wait_for(client.get("k"), 2)
 
@@ -42,12 +46,12 @@ async def test_cancelled_request_does_not_poison_the_next_one():
             pass
 
     server, port = await start_fake(echo_key_slowly)
-    client = ClusterClient([("127.0.0.1", port)])
+    client = ClusterClient([("127.0.0.1", port)], pool_size=1)
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(client.get("a"), 0.1)
-    assert client._connections == {}
-    assert await client.get("b") == "b"
+    assert no_idle(client)
+    assert await client.get("b") == b"b"
 
     await client.close()
     server.close()

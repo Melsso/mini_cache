@@ -1,4 +1,6 @@
 import time
+import asyncio
+import os
 
 import pytest
 
@@ -55,7 +57,7 @@ async def test_every_fsync_policy_round_trips(tmp_path, policy):
     store = Store()
     assert await replay_log.replay(store) == 1
     replay_log.close()
-    assert store.get("a") == "1"
+    assert store.get(b"a") == b"1"
 
 
 async def test_replay_cuts_off_a_command_torn_in_the_middle(tmp_path):
@@ -71,7 +73,7 @@ async def test_replay_cuts_off_a_command_torn_in_the_middle(tmp_path):
     log = AOFLog(path)
     store = Store()
     assert await log.replay(store) == 2
-    assert store.get("a") == "1" and store.get("b") == "2"
+    assert store.get(b"a") == b"1" and store.get(b"b") == b"2"
     assert path.stat().st_size == good_size
     assert (
         tmp_path / "torn.aof.corrupt"
@@ -83,7 +85,7 @@ async def test_replay_cuts_off_a_command_torn_in_the_middle(tmp_path):
     store2 = Store()
     assert await replay_log.replay(store2) == 3
     replay_log.close()
-    assert store2.get("c") == "3"
+    assert store2.get(b"c") == b"3"
 
 
 async def test_replay_cuts_off_a_torn_line(tmp_path):
@@ -98,7 +100,7 @@ async def test_replay_cuts_off_a_torn_line(tmp_path):
     store = Store()
     assert await log.replay(store) == 1
     log.close()
-    assert store.get("a") == "1"
+    assert store.get(b"a") == b"1"
 
 
 async def test_replay_honours_absolute_deadlines(tmp_path):
@@ -116,7 +118,44 @@ async def test_replay_honours_absolute_deadlines(tmp_path):
     await replay_log.replay(store)
     replay_log.close()
 
-    assert store.get("gone") is None
-    assert store.get("kept") == "y"
-    remaining = store.ttl("kept")
+    assert store.get(b"gone") is None
+    assert store.get(b"kept") == b"y"
+    remaining = store.ttl(b"kept")
     assert remaining is not None and 98 <= remaining <= 100
+
+
+def test_set_variants_normalise_for_the_aof():
+    assert to_aof_commands(
+        ["SET", "k", "v", "NX", "GET", "PX", "1500"], now=1000.0
+    ) == [
+        ["SET", "k", "v"],
+        ["PEXPIREAT", "k", "1001500"],
+    ]
+    assert to_aof_commands(["PEXPIRE", "k", "2000"], now=1000.0) == [
+        ["PEXPIREAT", "k", "1002000"]
+    ]
+
+
+async def test_always_policy_group_commits_off_the_event_loop(tmp_path, monkeypatch):
+    log = AOFLog(tmp_path / "g.aof", fsync="always")
+    calls = []
+    real_fsync = os.fsync
+
+    def slow_fsync(fd):
+        calls.append(fd)
+        time.sleep(0.05)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", slow_fsync)
+
+    async def write(i):
+        log.append(["SET", f"k{i}", "v"])
+        await log.commit()
+
+    await asyncio.gather(*(write(i) for i in range(20)))
+    assert 1 <= len(calls) <= 3
+    log.close()
+
+    replay_log = AOFLog(tmp_path / "g.aof")
+    assert await replay_log.replay(Store()) == 20
+    replay_log.close()

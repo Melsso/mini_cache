@@ -49,7 +49,7 @@ async def wait_until(condition, timeout=6.0, interval=0.05):
 async def test_heartbeats_do_not_corrupt_replica_state():
     primary = Server(host="127.0.0.1", port=0)
     await primary.start()
-    primary_port = primary._asyncio_server.sockets[0].getsockname()[1]
+    primary_port = primary.bound_port
 
     reader, writer = await open_client(primary_port)
     await send(writer, "SET", "foo", "bar")
@@ -60,12 +60,12 @@ async def test_heartbeats_do_not_corrupt_replica_state():
     replica = Server(host="127.0.0.1", port=0, replica_of=("127.0.0.1", primary_port))
     await replica.start()
 
-    ok = await wait_until(lambda: replica.store.get("foo") == "bar")
+    ok = await wait_until(lambda: replica.store.get(b"foo") == b"bar")
     assert ok
 
     await asyncio.sleep(2.2)
 
-    assert replica.store.get("foo") == "bar"
+    assert replica.store.get(b"foo") == b"bar"
     assert len(replica.store) == 1
     assert replica.replica_client.connected.is_set()
 
@@ -76,7 +76,7 @@ async def test_heartbeats_do_not_corrupt_replica_state():
 async def test_replica_reconnects_after_primary_restarts_on_same_port():
     primary1 = Server(host="127.0.0.1", port=0)
     await primary1.start()
-    port = primary1._asyncio_server.sockets[0].getsockname()[1]
+    port = primary1.bound_port
 
     reader, writer = await open_client(port)
     await send(writer, "SET", "foo", "bar")
@@ -86,7 +86,7 @@ async def test_replica_reconnects_after_primary_restarts_on_same_port():
 
     replica = Server(host="127.0.0.1", port=0, replica_of=("127.0.0.1", port))
     await replica.start()
-    ok = await wait_until(lambda: replica.store.get("foo") == "bar")
+    ok = await wait_until(lambda: replica.store.get(b"foo") == b"bar")
     assert ok
 
     await primary1.stop()
@@ -103,7 +103,7 @@ async def test_replica_reconnects_after_primary_restarts_on_same_port():
     writer.close()
     await writer.wait_closed()
 
-    ok = await wait_until(lambda: replica.store.get("after_restart") == "value")
+    ok = await wait_until(lambda: replica.store.get(b"after_restart") == b"value")
     assert ok
     assert replica.replica_client.connected.is_set()
 
@@ -118,7 +118,7 @@ async def test_primary_drops_replica_after_link_timeout(monkeypatch):
 
     primary = Server(host="127.0.0.1", port=0)
     await primary.start()
-    primary_port = primary._asyncio_server.sockets[0].getsockname()[1]
+    primary_port = primary.bound_port
 
     reader, writer = await open_client(primary_port)
     await send(writer, "SYNC")

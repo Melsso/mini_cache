@@ -23,7 +23,7 @@ async def test_read_simple_set_command():
     raw = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
     reader = make_reader(raw)
     cmd = await read_command(reader)
-    assert cmd == ["SET", "foo", "bar"]
+    assert cmd == [b"SET", b"foo", b"bar"]
 
 
 @pytest.mark.asyncio
@@ -32,15 +32,15 @@ async def test_read_multiple_commands_from_same_stream():
     reader = make_reader(raw)
     first = await read_command(reader)
     second = await read_command(reader)
-    assert first == ["PING"]
-    assert second == ["GET", "foo"]
+    assert first == [b"PING"]
+    assert second == [b"GET", b"foo"]
 
 
 @pytest.mark.asyncio
 async def test_read_inline_command():
     reader = make_reader(b"PING\r\n")
     cmd = await read_command(reader)
-    assert cmd == ["PING"]
+    assert cmd == [b"PING"]
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,7 @@ async def test_read_empty_bulk_string_arg():
     raw = b"*2\r\n$3\r\nSET\r\n$0\r\n\r\n"
     reader = make_reader(raw)
     cmd = await read_command(reader)
-    assert cmd == ["SET", ""]
+    assert cmd == [b"SET", b""]
 
 
 @pytest.mark.asyncio
@@ -120,4 +120,4 @@ async def test_round_trip_encode_then_decode():
     encoded = encode(command)
     reader = make_reader(encoded)
     decoded = await read_command(reader)
-    assert decoded == command
+    assert decoded == [part.encode() for part in command]

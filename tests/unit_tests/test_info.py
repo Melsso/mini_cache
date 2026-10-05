@@ -39,7 +39,7 @@ async def read_reply(reader):
 async def test_info_reports_master_role_by_default():
     server = Server(host="127.0.0.1", port=0)
     await server.start()
-    port = server._asyncio_server.sockets[0].getsockname()[1]
+    port = server.bound_port
 
     reader, writer = await open_client(port)
     await send(writer, "INFO")
@@ -55,11 +55,11 @@ async def test_info_reports_master_role_by_default():
 async def test_info_reports_replica_role_and_link_status():
     primary = Server(host="127.0.0.1", port=0)
     await primary.start()
-    primary_port = primary._asyncio_server.sockets[0].getsockname()[1]
+    primary_port = primary.bound_port
 
     replica = Server(host="127.0.0.1", port=0, replica_of=("127.0.0.1", primary_port))
     await replica.start()
-    replica_port = replica._asyncio_server.sockets[0].getsockname()[1]
+    replica_port = replica.bound_port
 
     elapsed = 0.0
     while elapsed < 2.0 and not replica.replica_client.connected.is_set():
@@ -82,7 +82,7 @@ async def test_info_reports_replica_role_and_link_status():
 async def test_info_reports_connected_replica_count():
     primary = Server(host="127.0.0.1", port=0)
     await primary.start()
-    primary_port = primary._asyncio_server.sockets[0].getsockname()[1]
+    primary_port = primary.bound_port
 
     replica = Server(host="127.0.0.1", port=0, replica_of=("127.0.0.1", primary_port))
     await replica.start()
@@ -106,7 +106,7 @@ async def test_info_reports_connected_replica_count():
 async def test_info_reports_keyspace_size():
     server = Server(host="127.0.0.1", port=0)
     await server.start()
-    port = server._asyncio_server.sockets[0].getsockname()[1]
+    port = server.bound_port
 
     reader, writer = await open_client(port)
     await send(writer, "SET", "a", "1")

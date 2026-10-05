@@ -9,7 +9,7 @@ from mini_cache.server import Server
 async def start(**kwargs):
     server = Server(host="127.0.0.1", port=kwargs.pop("port", 0), **kwargs)
     await server.start()
-    return server, server._asyncio_server.sockets[0].getsockname()[1]
+    return server, server.bound_port
 
 
 async def call(reader, writer, *parts):
@@ -47,7 +47,7 @@ async def test_cluster_client_authenticates():
     server, port = await start(requirepass="pw")
 
     async with ClusterClient([("127.0.0.1", port)], password="pw") as client:
-        assert await client.set("k", "v") == "OK"
+        assert await client.set("k", "v") is True
     async with ClusterClient([("127.0.0.1", port)], password="bad") as client:
         with pytest.raises(ClusterError):
             await client.get("k")
@@ -61,10 +61,10 @@ async def test_replica_syncs_from_a_password_protected_primary():
 
     replica, _ = await start(requirepass="pw", replica_of=("127.0.0.1", port))
     for _ in range(100):
-        if replica.store.get("foo") == "bar":
+        if replica.store.get(b"foo") == b"bar":
             break
         await asyncio.sleep(0.02)
-    assert replica.store.get("foo") == "bar"
+    assert replica.store.get(b"foo") == b"bar"
 
     await replica.stop()
     await primary.stop()
