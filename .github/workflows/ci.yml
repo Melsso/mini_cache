@@ -7,6 +7,10 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout
@@ -15,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -28,16 +32,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+          key: poetry-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: poetry install --with dev --no-interaction
 
-      - name: Run ruff check
+      - name: Run Ruff
         run: poetry run ruff check .
 
-      - name: Run mypy
+      - name: Run Typecheck
         run: poetry run mypy .
 
-      - name: Run pytest
+      - name: Run Tests
         run: poetry run pytest
+
+      - name: Build Package
+        run: poetry build

@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import bisect
 import hashlib
+from types import TracebackType
 
-from mini_cache.protocol import encode, read_reply
+from mini_cache.protocol import Error, ProtocolError, encode, read_reply
 
 DEFAULT_VIRTUAL_NODES = 150
+
+
+class ClusterError(Exception):
+    """Raised when a shard answers a command with an error reply."""
 
 
 class ConsistentHashRing:
@@ -20,6 +25,8 @@ class ConsistentHashRing:
             self.add_node(node)
 
     def add_node(self, node: str) -> None:
+        if node in self.nodes():
+            return
         for i in range(self.virtual_nodes):
             h = self._hash(f"{node}#{i}")
             self._ring[h] = node
@@ -47,7 +54,8 @@ class ConsistentHashRing:
 
     @staticmethod
     def _hash(value: str) -> int:
-        return int(hashlib.md5(value.encode("utf-8")).hexdigest(), 16)
+        digest = hashlib.md5(value.encode("utf-8"), usedforsecurity=False)
+        return int(digest.hexdigest(), 16)
 
 
 class ClusterClient:
@@ -61,6 +69,18 @@ class ClusterClient:
         self._connections: dict[
             str, tuple[asyncio.StreamReader, asyncio.StreamWriter]
         ] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def __aenter__(self) -> ClusterClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.close()
 
     def node_for(self, key: str) -> str:
         return self.ring.get_node(key)
@@ -90,27 +110,34 @@ class ClusterClient:
         results: dict[str, object] = {}
         for host, port in self.shards:
             node_id = self._node_id(host, port)
-            reader, writer = await self._connection_for(node_id)
-            writer.write(encode(["DBSIZE"]))
-            await writer.drain()
-            results[node_id] = await read_reply(reader)
+            results[node_id] = await self._roundtrip(node_id, ["DBSIZE"])
         return results
 
     async def close(self) -> None:
-        for reader, writer in self._connections.values():
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-        self._connections.clear()
+        for node_id in list(self._connections):
+            await self._drop_connection(node_id)
 
     async def _execute(self, key: str, parts: list[str]) -> object:
-        node_id = self.node_for(key)
-        reader, writer = await self._connection_for(node_id)
-        writer.write(encode(parts))
-        await writer.drain()
-        return await read_reply(reader)
+        return await self._roundtrip(self.node_for(key), parts)
+
+    async def _roundtrip(self, node_id: str, parts: list[str]) -> object:
+        lock = self._locks.setdefault(node_id, asyncio.Lock())
+        async with lock:
+            for attempt in (0, 1):
+                try:
+                    reader, writer = await self._connection_for(node_id)
+                    writer.write(encode(parts))
+                    await writer.drain()
+                    reply = await read_reply(reader)
+                except (OSError, ProtocolError, asyncio.IncompleteReadError):
+                    await self._drop_connection(node_id)
+                    if attempt == 1:
+                        raise
+                    continue
+                if isinstance(reply, Error):
+                    raise ClusterError(f"{node_id}: {reply}")
+                return reply
+        raise AssertionError("unreachable")
 
     async def _connection_for(
         self, node_id: str
@@ -120,6 +147,17 @@ class ClusterClient:
             reader, writer = await asyncio.open_connection(host, int(port_str))
             self._connections[node_id] = (reader, writer)
         return self._connections[node_id]
+
+    async def _drop_connection(self, node_id: str) -> None:
+        connection = self._connections.pop(node_id, None)
+        if connection is None:
+            return
+        writer = connection[1]
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 
     @staticmethod
     def _node_id(host: str, port: int) -> str:

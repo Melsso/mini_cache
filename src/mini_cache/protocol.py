@@ -5,9 +5,19 @@ from typing import Any
 
 CRLF = b"\r\n"
 
+MAX_BULK_LENGTH = 64 * 1024 * 1024
+MAX_ARRAY_LENGTH = 1024 * 1024
+
 
 class ProtocolError(Exception):
-    """Raised when the client sends malformed RESP."""
+    """Raised when the peer sends malformed RESP."""
+
+
+def _parse_int(text: str, what: str) -> int:
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise ProtocolError(f"invalid {what}: {text!r}") from exc
 
 
 async def read_command(reader: asyncio.StreamReader) -> list[str] | None:
@@ -18,13 +28,12 @@ async def read_command(reader: asyncio.StreamReader) -> list[str] | None:
     if not line.startswith("*"):
         return line.split()
 
-    try:
-        num_args = int(line[1:])
-    except ValueError as exc:
-        raise ProtocolError(f"invalid array length: {line!r}") from exc
+    num_args = _parse_int(line[1:], "array length")
 
     if num_args < 0:
         return []
+    if num_args > MAX_ARRAY_LENGTH:
+        raise ProtocolError(f"array length too large: {num_args}")
 
     args: list[str] = []
     for _ in range(num_args):
@@ -33,12 +42,20 @@ async def read_command(reader: asyncio.StreamReader) -> list[str] | None:
 
 
 async def _read_line(reader: asyncio.StreamReader) -> str | None:
-    raw = await reader.readline()
+    try:
+        raw = await reader.readline()
+    except ValueError as exc:
+        raise ProtocolError("line too long") from exc
     if raw == b"":
         return None
     if not raw.endswith(CRLF):
         raise ProtocolError(f"line not CRLF-terminated: {raw!r}")
     return raw[:-2].decode("utf-8", errors="replace")
+
+
+def _check_bulk_length(length: int) -> None:
+    if length < -1 or length > MAX_BULK_LENGTH:
+        raise ProtocolError(f"invalid bulk string length: {length}")
 
 
 async def _read_bulk_string(reader: asyncio.StreamReader) -> str:
@@ -48,7 +65,8 @@ async def _read_bulk_string(reader: asyncio.StreamReader) -> str:
     if not header.startswith("$"):
         raise ProtocolError(f"expected bulk string, got: {header!r}")
 
-    length = int(header[1:])
+    length = _parse_int(header[1:], "bulk string length")
+    _check_bulk_length(length)
     if length == -1:
         return ""
 
@@ -60,18 +78,6 @@ async def _read_bulk_string(reader: asyncio.StreamReader) -> str:
 
 
 def encode(value: Any) -> bytes:
-    """
-    Encode a Python value as a RESP reply.
-
-    Convention used by command handlers:
-      - str            -> simple string, EXCEPT the special OKType/ErrType below
-      - SimpleString    -> "+...\r\n"
-      - Error           -> "-...\r\n"
-      - int / bool      -> ":...\r\n"
-      - None            -> "$-1\r\n"      (null bulk string)
-      - bytes           -> "$len\r\n...\r\n" (bulk string)
-      - list / tuple    -> "*len\r\n" + encode(each item)
-    """
     if isinstance(value, SimpleString):
         return b"+" + value.encode("utf-8") + CRLF
     if isinstance(value, Error):
@@ -107,6 +113,8 @@ async def read_reply(reader: asyncio.StreamReader) -> object:
     line = await _read_line(reader)
     if line is None:
         raise ProtocolError("unexpected EOF reading reply")
+    if not line:
+        raise ProtocolError("empty reply line")
 
     prefix, body = line[0], line[1:]
 
@@ -115,18 +123,21 @@ async def read_reply(reader: asyncio.StreamReader) -> object:
     if prefix == "-":
         return Error(body)
     if prefix == ":":
-        return int(body)
+        return _parse_int(body, "integer reply")
     if prefix == "$":
-        length = int(body)
+        length = _parse_int(body, "bulk string length")
+        _check_bulk_length(length)
         if length == -1:
             return None
         data = await reader.readexactly(length)
         await reader.readexactly(2)
         return data.decode("utf-8", errors="replace")
     if prefix == "*":
-        count = int(body)
+        count = _parse_int(body, "array length")
         if count == -1:
             return None
+        if count < 0 or count > MAX_ARRAY_LENGTH:
+            raise ProtocolError(f"invalid array length: {count}")
         return [await read_reply(reader) for _ in range(count)]
 
     raise ProtocolError(f"unknown reply type: {line!r}")

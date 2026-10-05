@@ -4,9 +4,15 @@ import asyncio
 import logging
 import time
 
-from mini_cache.aof import AOFLog, is_write_command
+from mini_cache.aof import FSYNC_POLICIES, AOFLog, is_write_command, to_aof_commands
 from mini_cache.commands import dispatch
-from mini_cache.protocol import Error, ProtocolError, encode, read_command
+from mini_cache.protocol import (
+    Error,
+    ProtocolError,
+    SimpleString,
+    encode,
+    read_command,
+)
 from mini_cache.replication import (
     HEARTBEAT_INTERVAL,
     LINK_TIMEOUT,
@@ -20,6 +26,7 @@ logger = logging.getLogger("mini_cache.server")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6380
 EXPIRY_SWEEP_INTERVAL = 0.1
+AOF_SYNC_INTERVAL = 1.0
 
 
 class Server:
@@ -29,12 +36,18 @@ class Server:
         port: int = DEFAULT_PORT,
         aof_path: str | None = None,
         replica_of: tuple[str, int] | None = None,
+        aof_fsync: str = "always",
     ) -> None:
+        if aof_fsync not in FSYNC_POLICIES:
+            raise ValueError(
+                f"aof_fsync must be one of {FSYNC_POLICIES}, got {aof_fsync!r}"
+            )
         self.host = host
         self.port = port
         self.store = Store()
         self.aof: AOFLog | None = None
         self._aof_path = aof_path
+        self._aof_fsync = aof_fsync
         self.replica_of = replica_of
         self.replica_client: ReplicaClient | None = None
         self._replica_task: asyncio.Task | None = None
@@ -42,6 +55,7 @@ class Server:
         self._replica_heartbeat_task: asyncio.Task | None = None
         self._asyncio_server: asyncio.base_events.Server | None = None
         self._sweep_task: asyncio.Task | None = None
+        self._aof_sync_task: asyncio.Task | None = None
         self._client_tasks: set[asyncio.Task] = set()
         self._client_count = 0
         self._start_time: float | None = None
@@ -49,9 +63,15 @@ class Server:
     async def start(self) -> None:
         self._start_time = time.monotonic()
         if self._aof_path is not None:
-            self.aof = AOFLog(self._aof_path)
-            replayed = await self.aof.replay(self.store)
-            logger.info("replayed %d command(s) from %s", replayed, self._aof_path)
+            if self.replica_of is not None:
+                logger.warning(
+                    "AOF is ignored on replicas (replicated writes are not logged); "
+                    "starting without persistence"
+                )
+            else:
+                self.aof = AOFLog(self._aof_path, fsync=self._aof_fsync)
+                replayed = await self.aof.replay(self.store)
+                logger.info("replayed %d command(s) from %s", replayed, self._aof_path)
 
         if self.replica_of is not None:
             primary_host, primary_port = self.replica_of
@@ -65,14 +85,18 @@ class Server:
         self._replica_heartbeat_task = asyncio.create_task(
             self._replica_heartbeat_loop()
         )
+        if self.aof is not None and self._aof_fsync == "everysec":
+            self._aof_sync_task = asyncio.create_task(self._aof_sync_loop())
         addr = self._asyncio_server.sockets[0].getsockname()
         logger.info("mini_cache listening on %s:%s", addr[0], addr[1])
 
     async def serve_forever(self) -> None:
         await self.start()
         assert self._asyncio_server is not None
-        async with self._asyncio_server:
+        try:
             await self._asyncio_server.serve_forever()
+        finally:
+            await self.stop()
 
     async def stop(self) -> None:
         if self._asyncio_server is not None:
@@ -81,6 +105,7 @@ class Server:
         await self._cancel_task(self._sweep_task)
         await self._cancel_task(self._replica_task)
         await self._cancel_task(self._replica_heartbeat_task)
+        await self._cancel_task(self._aof_sync_task)
 
         for task in list(self._client_tasks):
             task.cancel()
@@ -128,37 +153,55 @@ class Server:
                     writer.write(encode(_protocol_error_reply(exc)))
                     await writer.drain()
                     break
+                except asyncio.IncompleteReadError:
+                    break
 
                 if command is None:
                     break
                 if not command:
                     continue
 
-                if command[0].upper() == "SYNC":
+                name = command[0].upper()
+
+                if name == "QUIT":
+                    writer.write(encode(SimpleString("OK")))
+                    await writer.drain()
+                    break
+
+                if name == "SYNC":
+                    if self.replica_of is not None:
+                        writer.write(
+                            encode(Error("ERR chained replication is not supported"))
+                        )
+                        await writer.drain()
+                        continue
                     await self._serve_replica(reader, writer)
                     return
 
-                if command[0].upper() == "INFO":
+                if name == "INFO":
                     writer.write(encode(self._build_info()))
                     await writer.drain()
                     continue
 
                 reply: object
-                if self.replica_of is not None and is_write_command(command[0]):
+                if self.replica_of is not None and is_write_command(name):
                     reply = Error("READONLY You can't write against a replica.")
                     writer.write(encode(reply))
                     await writer.drain()
                     continue
 
                 reply = dispatch(self.store, command)
-                if not isinstance(reply, Error) and is_write_command(command[0]):
+                if not isinstance(reply, Error) and is_write_command(name):
                     if self.aof is not None:
-                        self.aof.append(command)
+                        for aof_command in to_aof_commands(command):
+                            self.aof.append(aof_command)
                     await self._propagate_to_replicas(command)
                 writer.write(encode(reply))
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             pass
+        except Exception:
+            logger.exception("unexpected error while serving %s", peer)
         finally:
             self._client_count -= 1
             if task is not None:
@@ -205,6 +248,7 @@ class Server:
         logger.info("replica connected: %s", peer)
         self._replicas.add(writer)
         try:
+            writer.write(encode(["FLUSHDB"]))
             for snapshot_command in build_snapshot_commands(self.store):
                 writer.write(encode(snapshot_command))
             await writer.drain()
@@ -227,7 +271,7 @@ class Server:
 
     async def _propagate_to_replicas(self, command: list[str]) -> None:
         dead: list[asyncio.StreamWriter] = []
-        for writer in self._replicas:
+        for writer in list(self._replicas):
             try:
                 writer.write(encode(command))
                 await writer.drain()
@@ -245,6 +289,15 @@ class Server:
         except asyncio.CancelledError:
             pass
 
+    async def _aof_sync_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(AOF_SYNC_INTERVAL)
+                if self.aof is not None:
+                    await asyncio.to_thread(self.aof.sync)
+        except asyncio.CancelledError:
+            pass
+
     async def _sweep_loop(self) -> None:
         try:
             while True:
@@ -256,7 +309,5 @@ class Server:
             pass
 
 
-def _protocol_error_reply(exc: ProtocolError):
-    from mini_cache.protocol import Error
-
+def _protocol_error_reply(exc: ProtocolError) -> Error:
     return Error(f"ERR Protocol error: {exc}")

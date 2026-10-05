@@ -2,13 +2,12 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 RUN pip install --no-cache-dir poetry==2.3.4
-COPY pyproject.toml poetry.lock* ./
+COPY pyproject.toml poetry.lock* README.md LICENSE ./
 RUN poetry config virtualenvs.in-project true \
     && poetry install --only main --no-root --no-interaction
 
 COPY src ./src
-COPY README.md .
-RUN poetry install --no-interaction
+RUN poetry install --only main --no-interaction
 
 FROM python:3.11-slim
 

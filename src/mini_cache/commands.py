@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 from typing import Callable
 
 from mini_cache.protocol import Error, SimpleString
@@ -102,6 +103,15 @@ def _cmd_expire(store: Store, args: list[str]) -> object:
     return store.expire(args[0], seconds)
 
 
+def _cmd_pexpireat(store: Store, args: list[str]) -> object:
+    _require(args, 2)
+    try:
+        unix_ms = int(args[1])
+    except ValueError as exc:
+        raise _BadArgument("value is not an integer or out of range") from exc
+    return store.expire_at_unix(args[0], unix_ms / 1000)
+
+
 def _cmd_ttl(store: Store, args: list[str]) -> object:
     _require(args, 1)
     result = store.ttl(args[0])
@@ -116,8 +126,10 @@ def _cmd_persist(store: Store, args: list[str]) -> object:
 
 
 def _cmd_keys(store: Store, args: list[str]) -> object:
-    _require(args, 0)
-    return store.keys()
+    if len(args) > 1:
+        raise _WrongArity
+    pattern = args[0] if args else "*"
+    return [key for key in store.keys() if fnmatch.fnmatchcase(key, pattern)]
 
 
 def _cmd_flushdb(store: Store, args: list[str]) -> object:
@@ -139,6 +151,7 @@ _COMMANDS: dict[str, Handler] = {
     "DEL": _cmd_del,
     "EXISTS": _cmd_exists,
     "EXPIRE": _cmd_expire,
+    "PEXPIREAT": _cmd_pexpireat,
     "TTL": _cmd_ttl,
     "PERSIST": _cmd_persist,
     "KEYS": _cmd_keys,

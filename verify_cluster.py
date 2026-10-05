@@ -37,7 +37,10 @@ def basic_set_get() -> None:
     r.set("foo", "bar")
     check("GET returns the value just set", r.get("foo") == "bar")
     info = r.info()
-    check("INFO reports role master", info.get("role") == "master" or "role:master" in str(info))
+    check(
+        "INFO reports role master",
+        info.get("role") == "master" or "role:master" in str(info),
+    )
 
 
 def replication_propagates() -> None:
@@ -92,7 +95,10 @@ def sharding_routes_correctly() -> None:
 
     sizes = {node_id: client.dbsize() for node_id, client in clients.items()}
     print(f"    key counts per shard: {sizes}")
-    check("keys spread across more than one shard", len({v for v in sizes.values() if v > 0}) > 1)
+    check(
+        "keys spread across more than one shard",
+        len({v for v in sizes.values() if v > 0}) > 1,
+    )
 
 
 def persistence_survives_restart() -> None:
@@ -131,7 +137,9 @@ def persistence_survives_restart() -> None:
 
 
 def main() -> None:
-    print("Assuming 'docker compose up' is already running (shard1/2/3 + shard1-replica).\n")
+    print(
+        "Assuming 'docker compose up' is already running (shard1/2/3 + shard1-replica).\n"
+    )
     try:
         connect(SHARDS["shard1"]).ping()
     except redis.exceptions.ConnectionError:

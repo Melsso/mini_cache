@@ -40,11 +40,12 @@ class ReplicaClient:
                 await self._connect_and_stream()
             except asyncio.CancelledError:
                 raise
-            except (ConnectionError, OSError) as exc:
+            except Exception as exc:
                 logger.warning(
-                    "replication link to %s:%s lost: %s",
+                    "replication link to %s:%s lost: %s: %s",
                     self.primary_host,
                     self.primary_port,
+                    type(exc).__name__,
                     exc,
                 )
             self.connected.clear()
