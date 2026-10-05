@@ -11,7 +11,7 @@ Built incrementally as a learning project: single-node cache → persistence →
 - **Memory cap and eviction** — `--maxmemory` with `allkeys-lru` eviction (or `noeviction`, which rejects writes with `OOM`)
 - **Authentication** — optional password (`--requirepass` / `AUTH`), enforced on clients and on replication links
 - **Client limits** — maximum connections, idle timeout, and a per-client output limit; a client that stops reading is dropped
-- **TTLs** — lazy expiry on access plus a heap-driven background sweep (cost proportional to the number of expired keys)
+- **TTLs** — lazy expiry on access plus a heap-driven background sweep (cost proportional to the number of expired keys); `TTL` reports whole seconds, rounded up. `EX`/`EXPIRE` take integers (use `PX`/`PEXPIRE` for sub-second expiry)
 - **AOF persistence** — every write logged to disk and replayed on restart; TTLs are stored as absolute deadlines, a torn tail from a crash is repaired automatically, `fsync` policy is configurable (group commit, off the event loop, for `always`), and the log is compacted by `BGREWRITEAOF` or automatically
 - **Primary/replica replication** — live write propagation through a per-replica queue (a slow replica never slows the primary; one that falls too far behind is dropped and resyncs), full snapshot sync on connect
 - **Failure-detecting replication link** — heartbeats detect a dead primary/replica within seconds, automatic reconnect with backoff (detection only: there is no automatic promotion)

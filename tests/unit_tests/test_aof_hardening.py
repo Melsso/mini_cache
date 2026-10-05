@@ -20,7 +20,7 @@ def test_set_with_ex_becomes_set_plus_absolute_deadline():
 
 
 def test_fractional_ttl_is_converted():
-    assert to_aof_commands(["set", "k", "v", "ex", "1.5"], now=1000.0)[1] == [
+    assert to_aof_commands(["set", "k", "v", "px", "1500"], now=1000.0)[1] == [
         "PEXPIREAT",
         "k",
         "1001500",

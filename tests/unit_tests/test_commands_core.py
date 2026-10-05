@@ -1,4 +1,5 @@
 import pytest
+import time
 
 from mini_cache.commands import dispatch
 from mini_cache.protocol import Error, SimpleString
@@ -86,3 +87,30 @@ def test_pexpire(store):
     assert dispatch(store, ["PEXPIRE", "k", "10000"]) is True
     assert 8 <= dispatch(store, ["TTL", "k"]) <= 10
     assert dispatch(store, ["PEXPIRE", "nope", "10"]) is False
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["SET", "k", "v", "EX", "1.5"],
+        ["SET", "k", "v", "EX", "1e3"],
+        ["SET", "k", "v", "EX", "0"],
+        ["EXPIRE", "k", "1.5"],
+        ["EXPIRE", "k", "soon"],
+        ["PEXPIRE", "k", "1.5"],
+    ],
+)
+def test_expiry_arguments_must_be_integers(store, args):
+    dispatch(store, ["SET", "k", "v"])
+    assert isinstance(dispatch(store, args), Error)
+
+
+def test_ttl_rounds_up_so_a_live_key_never_reports_zero(store, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    dispatch(store, ["SET", "k", "v", "PX", "500"])
+    assert dispatch(store, ["TTL", "k"]) == 1
+    now[0] += 0.4  # 0.1s left
+    assert dispatch(store, ["TTL", "k"]) == 1
+    now[0] += 0.2  # expired
+    assert dispatch(store, ["TTL", "k"]) == -2

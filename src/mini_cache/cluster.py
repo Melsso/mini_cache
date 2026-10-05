@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import bisect
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -25,6 +26,22 @@ class ClusterError(Exception):
 
 class ClusterTimeoutError(ClusterError, TimeoutError):
     """Raised when a shard does not accept a connection or answer in time."""
+
+
+def _ttl_args(ttl: float) -> list[Arg]:
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError("ttl must be a positive, finite number of seconds")
+    if float(ttl).is_integer():
+        return ["EX", str(int(ttl))]
+    return ["PX", str(max(1, round(ttl * 1000)))]
+
+
+def _expire_command(key: Arg, seconds: float) -> list[Arg]:
+    if not math.isfinite(seconds):
+        raise ValueError("seconds must be finite")
+    if float(seconds).is_integer():
+        return ["EXPIRE", key, str(int(seconds))]
+    return ["PEXPIRE", key, str(round(seconds * 1000))]
 
 
 class ConsistentHashRing:
@@ -115,7 +132,7 @@ class ClusterPipeline:
     def set(self, key: Arg, value: Arg, ttl: float | None = None) -> ClusterPipeline:
         parts: list[Arg] = ["SET", key, value]
         if ttl is not None:
-            parts += ["EX", str(ttl)]
+            parts += _ttl_args(ttl)
         return self.command(*parts)
 
     def get(self, key: Arg) -> ClusterPipeline:
@@ -181,7 +198,7 @@ class ClusterClient:
     ) -> bool:
         parts: list[Arg] = ["SET", key, value]
         if ttl is not None:
-            parts += ["EX", str(ttl)]
+            parts += _ttl_args(ttl)
         if nx:
             parts.append("NX")
         if xx:
@@ -201,7 +218,7 @@ class ClusterClient:
         return _integer(await self._execute(key, ["INCRBY", key, str(amount)]))
 
     async def expire(self, key: Arg, seconds: float) -> bool:
-        return _integer(await self._execute(key, ["EXPIRE", key, str(seconds)])) == 1
+        return _integer(await self._execute(key, _expire_command(key, seconds))) == 1
 
     async def ttl(self, key: Arg) -> int:
         return _integer(await self._execute(key, ["TTL", key]))

@@ -262,9 +262,9 @@ async def test_cluster_client_reconnects_after_a_shard_restarts():
 
 async def test_cluster_client_raises_on_error_replies_and_works_as_context_manager():
     server = await start_server()
-    async with ClusterClient([("127.0.0.1", port_of(server))]) as client:
-        with pytest.raises(ClusterError):
-            await client.expire("foo", "not-a-number")
+    async with ClusterClient([("127.0.0.1", server.bound_port)]) as client:
         assert await client.set("foo", "bar") is True
+        with pytest.raises(ClusterError):
+            await client.incr("foo")
     assert all(not pool.idle for pool in client._pools.values())
     await server.stop()

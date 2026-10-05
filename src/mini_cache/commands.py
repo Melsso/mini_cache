@@ -89,16 +89,10 @@ class SetOptions:
 
 
 def _parse_ttl(unit: str, arg: Arg) -> float:
-    text = to_text(arg)
-    try:
-        amount = float(text) if unit == "EX" else int(text)
-    except ValueError as exc:
-        raise _BadArgument("value is not an integer or out of range") from exc
-    if not math.isfinite(amount):
-        raise _BadArgument("syntax error")
-    if amount <= 0:
+    number = _parse_int(arg)
+    if number <= 0:
         raise _BadArgument("invalid expire time in 'set' command")
-    return amount if unit == "EX" else amount / 1000
+    return float(number) if unit == "EX" else number / 1000
 
 
 def parse_set(args: Sequence[Arg]) -> SetOptions:
@@ -209,11 +203,7 @@ def _cmd_exists(store: Store, args: Sequence[Arg]) -> object:
 
 def _cmd_expire(store: Store, args: Sequence[Arg]) -> object:
     _require(args, 2)
-    try:
-        seconds = float(to_text(args[1]))
-    except ValueError as exc:
-        raise _BadArgument("value is not an integer or out of range") from exc
-    return store.expire(args[0], seconds)
+    return store.expire(args[0], _parse_int(args[1]))
 
 
 def _cmd_pexpire(store: Store, args: Sequence[Arg]) -> object:
@@ -235,7 +225,9 @@ def _cmd_ttl(store: Store, args: Sequence[Arg]) -> object:
     result = store.ttl(args[0])
     if result is None:
         return -2
-    return int(result) if result != -1.0 else -1
+    if result == -1.0:
+        return -1
+    return math.ceil(result)
 
 
 def _cmd_persist(store: Store, args: Sequence[Arg]) -> object:

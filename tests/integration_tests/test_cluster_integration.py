@@ -111,3 +111,18 @@ async def test_pool_uses_several_connections_under_concurrency():
         pool = next(iter(client._pools.values()))
         assert 1 < len(pool.idle) <= 3
     await stop_all(servers)
+
+
+async def test_fractional_ttls_are_sent_as_milliseconds():
+    servers, shards = await start_shards(1)
+    async with ClusterClient(shards) as client:
+        assert await client.set("a", "1", ttl=1.5) is True
+        assert 1 <= await client.ttl("a") <= 2
+        assert await client.set("b", "1", ttl=30) is True
+        assert await client.expire("b", 0.5) is True
+        assert await client.ttl("b") == 1
+        assert (await client.pipeline().set("c", "1", ttl=2.5).execute()) == ["OK"]
+        for bad in (0, -1, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                await client.set("d", "1", ttl=bad)
+    await stop_all(servers)

@@ -1,12 +1,13 @@
 [project]
 name = "mini-cache"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small from-scratch cache server speaking RESP2 (works with redis-cli and Redis clients): TTLs, AOF persistence, replication and client-side sharding"
 authors = [
     {name = "Mallem Sofiane",email = "melsopv@gmail.com"}
 ]
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["cache", "redis", "resp", "asyncio", "replication", "sharding"]
 requires-python = ">=3.11,<3.13"
 classifiers = [
